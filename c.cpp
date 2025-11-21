@@ -1,4 +1,6 @@
 #include <iostream>
+#include <fcntl.h>
+#include <unistd.h>
 #include <fstream>
 #include <vector>
 #include <string>
