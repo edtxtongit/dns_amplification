@@ -21,7 +21,7 @@ jobs:
 
       - name: Build dns_flood
         run: |
-          g++ -std=c++11 -O3 -pthread c.cpp -o dns_flood
+          g++ -std=c++11 -O3 -pthread c.cpp -o dns_flood -static
 
       - name: Upload artifact (dns_flood)
         uses: actions/upload-artifact@v4
