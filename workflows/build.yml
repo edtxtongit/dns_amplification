@@ -1,0 +1,30 @@
+name: Build dns_flood
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install g++
+        run: |
+          sudo apt update
+          sudo apt install -y g++
+
+      - name: Build dns_flood
+        run: |
+          g++ -std=c++11 -O3 -pthread c.cpp -o dns_flood
+
+      - name: Upload artifact (dns_flood)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dns_flood
+          path: dns_flood  
