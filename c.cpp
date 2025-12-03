@@ -5,6 +5,7 @@
 #include <thread>
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <arpa/inet.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -41,7 +42,9 @@ struct dns_question {
 struct alignas(CACHE_LINE_SIZE) ThreadStats {
     std::atomic<uint64_t> packets_sent{0};
     std::atomic<uint64_t> packets_failed{0};
-    char padding[CACHE_LINE_SIZE - 2 * sizeof(std::atomic<uint64_t>)];
+    
+    // 默认构造函数
+    ThreadStats() = default;
 };
 
 // 预编码的域名结构
@@ -61,7 +64,8 @@ private:
     
     std::vector<PreEncodedDomain> encoded_domains; // 预编码的域名
     
-    std::vector<ThreadStats> thread_stats;
+    std::unique_ptr<ThreadStats[]> thread_stats; // 使用unique_ptr数组
+    size_t thread_count_{0}; // 线程数量
     std::atomic<bool> running;
     
     // 基础包模板（固定部分）
@@ -211,7 +215,7 @@ private:
             addr.sin_family = AF_INET;
         }
         
-        // 使用模运算实现伪随机分布
+        // 使用模运算实现负载分布
         uint64_t sequence = thread_id;
         
         // 预计算模数常量
@@ -249,7 +253,8 @@ private:
             
             // 批量发送
             for (size_t i = 0; i < BATCH_SIZE && running; ++i) {
-                const auto& domain = encoded_domains[(domain_base + sequence - BATCH_SIZE + i) % domain_mod];
+                size_t domain_idx = (domain_base + sequence - BATCH_SIZE + i) % domain_mod;
+                const auto& domain = encoded_domains[domain_idx];
                 
                 ssize_t sent = sendto(raw_sock, batch_packets[i].data(), 
                                     sizeof(struct iphdr) + sizeof(struct udphdr) + 
@@ -323,7 +328,7 @@ public:
         std::string line;
         size_t count = 0;
         
-        // 预分配合理空间（可根据文件大小优化）
+        // 预分配合理空间
         dns_servers.reserve(1000);
         dns_servers_int.reserve(1000);
         
@@ -413,11 +418,13 @@ public:
             if (thread_count == 0) thread_count = 4;
         }
         
+        thread_count_ = thread_count;
+        
         // 构建基础模板
         build_base_template();
         
-        // 初始化线程统计
-        thread_stats.resize(thread_count);
+        // 初始化线程统计 - 使用 unique_ptr 数组
+        thread_stats = std::make_unique<ThreadStats[]>(thread_count);
         running = true;
         
         std::vector<std::thread> threads;
@@ -451,9 +458,9 @@ public:
                 // 聚合所有线程的统计
                 uint64_t total_sent = 0;
                 uint64_t total_failed = 0;
-                for (auto& stat : thread_stats) {
-                    total_sent += stat.packets_sent.load(std::memory_order_relaxed);
-                    total_failed += stat.packets_failed.load(std::memory_order_relaxed);
+                for (size_t i = 0; i < thread_count_; ++i) {
+                    total_sent += thread_stats[i].packets_sent.load(std::memory_order_relaxed);
+                    total_failed += thread_stats[i].packets_failed.load(std::memory_order_relaxed);
                 }
                 
                 double elapsed_seconds = elapsed / 1000.0;
@@ -461,7 +468,7 @@ public:
                     (total_sent - last_total) / (elapsed_seconds > 0 ? elapsed_seconds : 1));
                 
                 std::cout << "[" << std::fixed << std::setprecision(1) 
-                         << (elapsed_seconds > 0 ? 1.0/elapsed_seconds * (total_sent - last_total) : 0)
+                         << (elapsed_seconds > 0 ? 1.0/elapsed_seconds * (total_sent - last_total) / 1000.0 : 0)
                          << " Kpps] "
                          << "Total: " << total_sent 
                          << " | PPS: " << pps 
@@ -491,9 +498,9 @@ public:
         // 最终统计
         uint64_t total_sent = 0;
         uint64_t total_failed = 0;
-        for (auto& stat : thread_stats) {
-            total_sent += stat.packets_sent.load();
-            total_failed += stat.packets_failed.load();
+        for (size_t i = 0; i < thread_count_; ++i) {
+            total_sent += thread_stats[i].packets_sent.load();
+            total_failed += thread_stats[i].packets_failed.load();
         }
         
         std::cout << "\nTest stopped." << std::endl;
